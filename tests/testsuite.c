@@ -227,8 +227,8 @@ static int compare_images(const struct spng_ihdr *ihdr,
             }
             else if(fmt & (SPNG_FMT_PNG | SPNG_FMT_RAW | SPNG_FMT_G8 | SPNG_FMT_GA8 | SPNG_FMT_GA16))
             {
-                if(ihdr->bit_depth <= 8) /* gray 1-8, gray-alpha 8, indexed 1-8 */
-                {
+                if(fmt != SPNG_FMT_GA16 && (fmt & (SPNG_FMT_G8 | SPNG_FMT_GA8) || ihdr->bit_depth <= 8))
+                {/* gray 1-8, gray-alpha 8, indexed 1-8 */
                     uint8_t s_alpha, s_sample;
                     uint8_t p_alpha, p_sample;
 
@@ -251,7 +251,7 @@ static int compare_images(const struct spng_ihdr *ihdr,
                         png_alpha = p_alpha;
                     }
                 }
-                else /* gray 16, gray-alpha 16 */
+                else /* gray 16, gray-alpha 16, SPNG_FMT_GA16 */
                 {
                     uint16_t s_alpha, s_sample;
                     uint16_t p_alpha, p_sample;
@@ -1254,7 +1254,7 @@ cleanup:
     return ret;
 }
 
-static int get_image_info(FILE *f, struct spng_ihdr *ihdr)
+static int get_image_info(FILE *f, struct spng_ihdr *ihdr, int *have_trns)
 {
     spng_ctx *ctx = spng_ctx_new(0);
 
@@ -1263,6 +1263,9 @@ static int get_image_info(FILE *f, struct spng_ihdr *ihdr)
     spng_set_png_file(ctx, f);
 
     int ret = spng_get_ihdr(ctx, ihdr);
+
+    struct spng_trns trns;
+    *have_trns = !spng_get_trns(ctx, &trns);
 
     spng_ctx_free(ctx);
 
@@ -1303,8 +1306,9 @@ int main(int argc, char **argv)
     }
 
     struct spng_ihdr ihdr = {0};
+    int have_trns = 0;
 
-    if(!get_image_info(file, &ihdr))
+    if(!get_image_info(file, &ihdr, &have_trns))
     {
         char *clr_type_str;
         if(ihdr.color_type == SPNG_COLOR_TYPE_GRAYSCALE)
@@ -1333,15 +1337,15 @@ int main(int argc, char **argv)
 */
     int gamma_bug = 0;
     int skip_encode = 0;
-    int fmt_limit = SPNGT_SKIP;
-    int fmt_limit_2 = SPNGT_SKIP;
+    int gray_palette_trns_bug = 0;
 
     /* https://github.com/randy408/libspng/issues/17 */
     if(ihdr.color_type == SPNG_COLOR_TYPE_GRAYSCALE) gamma_bug = SPNGT_SKIP;
 
-    /* Some output formats are limited to certain PNG formats */
-    if(ihdr.color_type == SPNG_COLOR_TYPE_GRAYSCALE && ihdr.bit_depth <= 8) fmt_limit = 0;
-    if(ihdr.color_type == SPNG_COLOR_TYPE_GRAYSCALE && ihdr.bit_depth == 16) fmt_limit_2 = 0;
+    /* libpng always applies palette transparency when expanding to RGB,
+       alpha-less output without SPNG_DECODE_TRNS can't be compared */
+    if(have_trns && ihdr.color_type == SPNG_COLOR_TYPE_INDEXED)
+        gray_palette_trns_bug = SPNGT_SKIP;
 
     add_test_case(SPNG_FMT_PNG, 0, SPNGT_COMPARE_CHUNKS);
     add_test_case(SPNG_FMT_PNG, 0, SPNGT_ENCODE_ROUNDTRIP | skip_encode);
@@ -1354,12 +1358,12 @@ int main(int argc, char **argv)
     add_test_case(SPNG_FMT_RGB8, 0, 0);
     add_test_case(SPNG_FMT_RGB8, SPNG_DECODE_GAMMA, gamma_bug);
 
-    add_test_case(SPNG_FMT_G8, 0, fmt_limit);
-    add_test_case(SPNG_FMT_GA8, 0, fmt_limit);
-    add_test_case(SPNG_FMT_GA8, SPNG_DECODE_TRNS, fmt_limit);
+    add_test_case(SPNG_FMT_G8, 0, 0);
+    add_test_case(SPNG_FMT_GA8, 0, gray_palette_trns_bug);
+    add_test_case(SPNG_FMT_GA8, SPNG_DECODE_TRNS, 0);
 
-    add_test_case(SPNG_FMT_GA16, 0, fmt_limit_2);
-    add_test_case(SPNG_FMT_GA16, SPNG_DECODE_TRNS, fmt_limit_2);
+    add_test_case(SPNG_FMT_GA16, 0, gray_palette_trns_bug);
+    add_test_case(SPNG_FMT_GA16, SPNG_DECODE_TRNS, 0);
 
     /* This tests the input->output format logic used in libvips,
        it emulates the behavior of their old PNG loader which uses libpng. */

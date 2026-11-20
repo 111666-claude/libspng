@@ -97,6 +97,8 @@ unsigned char *getimage_libpng(png_structp png_ptr, png_infop info_ptr, size_t *
     png_uint_32 width, height;
     int bit_depth, color_type, interlace_type, compression_type;
     int filter_method;
+    int expand_to_16 = 0;
+    int gray_from_rgb = 0;
 
     if(!png_get_IHDR(png_ptr, info_ptr, &width, &height, &bit_depth,
                      &color_type, &interlace_type, &compression_type, &filter_method))
@@ -111,6 +113,14 @@ unsigned char *getimage_libpng(png_structp png_ptr, png_infop info_ptr, size_t *
         if(png_get_gAMA(png_ptr, info_ptr, &gamma))
             png_set_gamma(png_ptr, 2.2, gamma);
     }
+
+    /* libpng's png_set_rgb_to_gray() converts in linear space when the image
+       has a gAMA chunk, decode to RGB(A) and convert to grayscale in the
+       harness instead */
+    double file_gamma;
+    int gray_gamma_quirk = png_get_gAMA(png_ptr, info_ptr, &file_gamma) &&
+                           (color_type & PNG_COLOR_MASK_COLOR) != 0 &&
+                           (fmt & (SPNG_FMT_G8 | SPNG_FMT_GA8 | SPNG_FMT_GA16));
 
     if(fmt == SPNG_FMT_RGBA16)
     {
@@ -140,30 +150,55 @@ unsigned char *getimage_libpng(png_structp png_ptr, png_infop info_ptr, size_t *
 
         png_set_strip_16(png_ptr);
     }
-    else if(fmt == SPNG_FMT_G8) /* assumes only <=8-bit grayscale images */
-    {/* TODO: support all input formats */
-        png_set_expand_gray_1_2_4_to_8(png_ptr);
-    }
-    else if(fmt == SPNG_FMT_GA16) /* assumes only 16-bit grayscale images */
-    {/* TODO: support all input formats */
-        if(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS) && (flags & SPNG_DECODE_TRNS))
-        {
-            png_set_tRNS_to_alpha(png_ptr);
-        }
+    else if(fmt == SPNG_FMT_G8)
+    {
+        if(gray_gamma_quirk) gray_from_rgb = 1;
         else
         {
-            if(bit_depth == 16) png_set_filler(png_ptr, 0xFFFF, PNG_FILLER_AFTER);
-        }
-    }
-    else if(fmt == SPNG_FMT_GA8) /* assumes only <=8-bit grayscale images */
-    {/* TODO: support all input formats */
-        if(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS) && (flags & SPNG_DECODE_TRNS))
-        {
-            png_set_tRNS_to_alpha(png_ptr);
-        }
-        else
-        {
+            png_set_rgb_to_gray(png_ptr, PNG_ERROR_ACTION_NONE, -1, -1);
+
             png_set_expand_gray_1_2_4_to_8(png_ptr);
+
+            png_set_strip_16(png_ptr);
+
+            png_set_strip_alpha(png_ptr);
+        }
+    }
+    else if(fmt == SPNG_FMT_GA16)
+    {
+        if(gray_gamma_quirk) gray_from_rgb = 1;
+        else
+        {
+            if(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS) && (flags & SPNG_DECODE_TRNS))
+            {
+                png_set_tRNS_to_alpha(png_ptr);
+            }
+
+            png_set_rgb_to_gray(png_ptr, PNG_ERROR_ACTION_NONE, -1, -1);
+
+            png_set_expand_gray_1_2_4_to_8(png_ptr);
+
+            png_set_filler(png_ptr, bit_depth == 16 ? 0xFFFF : 0xFF, PNG_FILLER_AFTER);
+
+            expand_to_16 = bit_depth < 16;
+        }
+    }
+    else if(fmt == SPNG_FMT_GA8)
+    {
+        if(gray_gamma_quirk) gray_from_rgb = 1;
+        else
+        {
+            if(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS) && (flags & SPNG_DECODE_TRNS))
+            {
+                png_set_tRNS_to_alpha(png_ptr);
+            }
+
+            png_set_rgb_to_gray(png_ptr, PNG_ERROR_ACTION_NONE, -1, -1);
+
+            png_set_expand_gray_1_2_4_to_8(png_ptr);
+
+            png_set_strip_16(png_ptr);
+
             png_set_filler(png_ptr, 0xFF, PNG_FILLER_AFTER);
         }
     }
@@ -178,6 +213,20 @@ unsigned char *getimage_libpng(png_structp png_ptr, png_infop info_ptr, size_t *
 #if defined(SPNGT_LITTLE_ENDIAN)
         png_set_swap(png_ptr);
 #endif
+    }
+
+    if(gray_from_rgb)
+    {/* Decode to RGBA8/RGBA16, converted to grayscale after png_read_image() */
+        if(color_type == PNG_COLOR_TYPE_PALETTE) png_set_palette_to_rgb(png_ptr);
+
+        if(color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) png_set_expand_gray_1_2_4_to_8(png_ptr);
+
+        if(png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS) && (flags & SPNG_DECODE_TRNS))
+            png_set_tRNS_to_alpha(png_ptr);
+
+        png_set_gray_to_rgb(png_ptr);
+
+        png_set_filler(png_ptr, bit_depth == 16 ? 0xFFFF : 0xFF, PNG_FILLER_AFTER);
     }
 
 #if defined(SPNGT_LITTLE_ENDIAN) /* we want host-endian values unless it's SPNG_FMT_RAW */
@@ -222,6 +271,112 @@ unsigned char *getimage_libpng(png_structp png_ptr, png_infop info_ptr, size_t *
     png_read_end(png_ptr, info_ptr);
 
     free(row_pointers);
+
+    if(gray_from_rgb)
+    {/* RGBA8/RGBA16 -> G8/GA8/GA16, the coefficients and rounding
+        match spng's rgb_to_gray()/rgb_to_gray16() */
+        size_t pixel_count = (size_t)width * height;
+        size_t pixel_size = fmt == SPNG_FMT_G8 ? 1 : (fmt == SPNG_FMT_GA8 ? 2 : 4);
+        size_t new_size = pixel_count * pixel_size;
+        int src16 = bit_depth == 16;
+
+        unsigned char *new_image = malloc(new_size);
+        if(new_image == NULL)
+        {
+            printf("libpng: malloc() failed\n");
+            free(image);
+            png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+            return NULL;
+        }
+
+        size_t i, j = 0;
+        for(i=0; i < pixel_count; i++)
+        {
+            uint32_t gray, alpha;
+
+            if(src16)
+            {
+                uint16_t r, g, b, a;
+                memcpy(&r, image + i * 8, 2);
+                memcpy(&g, image + i * 8 + 2, 2);
+                memcpy(&b, image + i * 8 + 4, 2);
+                memcpy(&a, image + i * 8 + 6, 2);
+
+                gray = ((uint32_t)r * 6968 + (uint32_t)g * 23434 + (uint32_t)b * 2366 + 16384) >> 15;
+                alpha = a;
+            }
+            else
+            {
+                uint32_t r = image[i * 4], g = image[i * 4 + 1], b = image[i * 4 + 2];
+
+                gray = (r * 6968 + g * 23434 + b * 2366) >> 15;
+                alpha = image[i * 4 + 3];
+            }
+
+            if(fmt == SPNG_FMT_G8)
+            {
+                if(src16) gray >>= 8;
+                new_image[j] = (unsigned char)gray;
+                j += 1;
+            }
+            else if(fmt == SPNG_FMT_GA8)
+            {
+                if(src16) { gray >>= 8; alpha >>= 8; }
+                new_image[j]     = (unsigned char)gray;
+                new_image[j + 1] = (unsigned char)alpha;
+                j += 2;
+            }
+            else /* SPNG_FMT_GA16 */
+            {
+                uint16_t g16, a16;
+
+                if(!src16) { gray *= 257; alpha *= 257; }
+
+                g16 = (uint16_t)gray;
+                a16 = (uint16_t)alpha;
+
+                memcpy(new_image + j, &g16, 2);
+                memcpy(new_image + j + 2, &a16, 2);
+                j += 4;
+            }
+        }
+
+        free(image);
+        image = new_image;
+        memcpy(out_size, &new_size, sizeof(size_t));
+    }
+
+    if(expand_to_16)
+    {/* 8 to 16-bit expansion for SPNG_FMT_GA16, png_set_expand_16() is not
+        used because it also applies tRNS unconditionally */
+        size_t pixel_count = (size_t)width * height;
+        size_t new_size = pixel_count * 4;
+
+        unsigned char *new_image = malloc(new_size);
+        if(new_image == NULL)
+        {
+            printf("libpng: malloc() failed\n");
+            free(image);
+            png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
+            return NULL;
+        }
+
+        size_t i;
+        for(i=0; i < pixel_count; i++)
+        {
+            uint8_t gray = image[i * 2];
+            uint8_t alpha = image[i * 2 + 1];
+
+            new_image[i * 4]     = gray;
+            new_image[i * 4 + 1] = gray;
+            new_image[i * 4 + 2] = alpha;
+            new_image[i * 4 + 3] = alpha;
+        }
+
+        free(image);
+        image = new_image;
+        memcpy(out_size, &new_size, sizeof(size_t));
+    }
 
     return image;
 }

@@ -31,6 +31,9 @@ test_deps = [ spng_dep, png_dep ]
 
 test_exe = executable('testsuite', 'testsuite.c', dependencies : test_deps)
 
+gray_formats_exe = executable('gray_formats', 'gray_formats.c', dependencies : spng_dep)
+test('gray_formats', gray_formats_exe)
+
 test('info', test_exe, args : 'info')
 
 cpp_exe = executable('cpp_exe', 'test.cpp', dependencies : spng_dep)

@@ -215,9 +215,9 @@ This function can only be called once per context.
 | Any format*  | `SPNG_FMT_RGBA8`  | All    | Convert from any PNG format and bit depth     |
 | Any format   | `SPNG_FMT_RGBA16` | All    | Convert from any PNG format and bit depth     |
 | Any format   | `SPNG_FMT_RGB8`   | All    | Convert from any PNG format and bit depth     |
-| Gray <=8-bit | `SPNG_FMT_G8`     | None** | Only valid for 1, 2, 4, 8-bit grayscale PNG's |
-| Gray 16-bit  | `SPNG_FMT_GA16`   | All**  | Only valid for 16-bit grayscale PNG's         |
-| Gray <=8-bit | `SPNG_FMT_GA8`    | All**  | Only valid for 1, 2, 4, 8-bit grayscale PNG's |
+| Any format   | `SPNG_FMT_G8`     | None** | Convert to 8-bit grayscale                    |
+| Any format   | `SPNG_FMT_GA16`   | All**  | Convert to 16-bit grayscale + alpha           |
+| Any format   | `SPNG_FMT_GA8`    | All**  | Convert to 8-bit grayscale + alpha            |
 | Any format   | `SPNG_FMT_PNG`    | None** | The PNG's format in host-endian               |
 | Any format   | `SPNG_FMT_RAW`    | None   | The PNG's format in big-endian                |
 
@@ -227,6 +227,11 @@ This function can only be called once per context.
 \*\* Gamma correction is not implemented
 
 The `SPNG_DECODE_PROGRESSIVE` flag is supported in all cases.
+
+For `SPNG_FMT_G8`, `SPNG_FMT_GA8` and `SPNG_FMT_GA16` color images are
+converted to grayscale using the ITU-R BT.709 luma coefficients
+(`0.2126 R + 0.7152 G + 0.0722 B`), matching libpng's `png_set_rgb_to_gray()`
+defaults.
 
 The alpha channel is always [straight alpha](https://en.wikipedia.org/wiki/Alpha_compositing#Straight_versus_premultiplied),
 premultiplied alpha is not supported.
